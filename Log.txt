@@ -1,0 +1,43 @@
+Before (no optimization)
+110000
+
+
+
+After applying "omp parallel for collapse(n)" 
+70000
+
+
+
+After removing file read/write
+35000
+
+
+ 
+After further optimization (combinining parallel regions)  - E80
+17000
+
+
+Optimizing gray_scale function with dynamic scheduling. Chunk size 30.
+Very slight marginal improvement. (about 100ms) 
+
+
+After measuring by running EXE file directly:
+8500 - 9000
+
+
+-> Replaced manual summing with reduction in gaussian blur 
+no observable change
+
+
+Measuring directly from EXE after removing optimizations:
+30000 - 32000
+
+
+
+attempted to replace "for" with "sections" in pad_2D.
+overall time increased by about 500ms
+
+
+Explciitly defined threads using omp_set_thread_num() to 16. 
+No signfiicant effect
+

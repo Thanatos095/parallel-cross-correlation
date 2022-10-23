@@ -6,6 +6,8 @@
 
 #include <iostream>
 #include <fstream>
+#include <chrono>
+#include <omp.h>
 #include "stb_image.h"
 #include "stb_image_write.h"
 typedef unsigned char Byte;
@@ -118,7 +120,7 @@ private:
 /*Writes in png format*/
 
 /*The given image should have 3 channels(3d image). Outputs a grayscaled image which is now 2d.*/
-Image gray_scale(const Image& source){
+Image p_gray_scale(const Image& source){
     if (source.channels != 3) throw std::logic_error("gray_scale() : Number of channels should be 3.");
     size_t num_pixels = source.width * source.height;
     
@@ -126,9 +128,137 @@ Image gray_scale(const Image& source){
     const double* source_mem = source.get_mem();
     Image to_return(source.width, source.height, source.channels);
 
-    for (size_t i = 0; i < num_pixels; i++)
+    #pragma omp parallel for schedule(dynamic, 30)
+    for (int i = 0; i < num_pixels; i++)
         buffer[i] = (source_mem[i * 3] + source_mem[i * 3 + 1] + source_mem[i * 3 + 2]) / 3;
         /* Averaging the rgb values*/
+
+    return Image(source.width, source.height, 1, buffer);
+}
+
+/*The given image should have a single channel. This function cascades a value along along the specified boundaries with the value given.*/
+Image p_pad_2D(const Image& source, double value, size_t up, size_t left, size_t right, size_t down) {
+    if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
+    size_t new_width = source.width + left + right;
+    size_t new_height = source.height + up + down;
+    Image to_ret(new_width, new_height, 1);
+    
+    #pragma omp parallel 
+    {
+    #pragma omp for collapse(2)
+        for (int i = 0; i < up; i++) /*Up*/
+            for (int j = 0; j < new_width; j++)
+                to_ret(i, j) = value;
+
+    #pragma omp for collapse(2)
+        for (int i = new_height - down; i < new_height; i++) /*Down*/
+            for (int j = 0; j < new_width; j++)
+                to_ret(i, j) = value;
+
+    #pragma omp for collapse(2)
+        for (int i = 0; i < left; i++) /*Left*/
+            for (int j = 0; j < new_height; j++)
+                to_ret(j, i) = value;
+
+    #pragma omp for collapse(2)
+        for (int i = new_width - right; i < new_width; i++)/*Right*/
+            for (int j = 0; j < new_height; j++)
+                to_ret(j, i) = value;
+
+    #pragma omp for collapse(2)
+        for (int i = up; i < up + source.height - 1; i++)
+            for (int j = left; j < left + source.width - 1; j++)
+                to_ret(i, j) = source(i - up, j - left);
+    }
+   
+    return to_ret;
+}
+
+/*The given image should have a single channel*/
+Image p_correlate(const Image& source, const Filter& filter) {
+    
+    if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
+
+    size_t stride = 1, filter_width = filter.width, filter_height = filter.height, padding = 0, width = source.width, height = source.height;
+    size_t out_width = ((width - filter_width + 2 * padding) / stride) + 1;
+    size_t out_height = ((height - filter_height + 2 * padding) / stride) + 1;
+
+    Image target(out_width, out_height, 1);
+
+    #pragma omp parallel for collapse(4)
+    for (int i = 0; i < out_height; i++) 
+        for (int j = 0; j < out_width; j++)
+            for (int a = 0; a < filter_height; a++)
+                for (int b = 0; b < filter_width; b++)
+                    target(i, j) += source(i + a, j + b) * filter(a, b);
+
+    return target;
+}
+
+/*The given image should have a single channel*/
+Image p_edge_detection(const Image& source) {
+
+    if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
+    
+    Filter sobelX = { {1, 0, -1},
+                      {2, 0, -2},
+                      {1, 0, -1} };
+    Filter sobelY = {{ 1,  2,  1},
+                     { 0,  0,  0},
+                     {-1, -2, -1} };
+    Image X = p_correlate(source, sobelX);
+    Image Y = p_correlate(source, sobelY);
+
+    /*Combining the vertical and horizontal edges*/
+    #pragma omp parallel for collapse(2)
+    for (int i = 0; i < X.height; i++) {
+        for (int j = 0; j < X.width; j++)
+        {
+            X(i, j) = sqrt(pow(X(i, j), 2) + pow(Y(i, j), 2));
+        }
+    }
+    return X;
+}
+
+/*The given image should have a single channel*/
+Image p_gaussian_blurr(Image& source, int radius, double sigma) {
+    if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
+    Filter gauss(radius, radius);
+    double sum = 0;
+
+    #pragma omp parallel 
+    {
+    #pragma omp for collapse(2) reduction (+:sum) 
+        for (int i = 0; i < radius; i++) {
+            for (int j = 0; j < radius; j++) {
+                double sigma_pow_twice = 2 * sigma * sigma;
+                gauss(i, j) = exp(-(pow(i - radius / 2.f, 2) + pow(j - radius / 2.f, 2)) / sigma_pow_twice) / (3.14159265358979323846 * sigma_pow_twice);
+                sum = gauss(i, j);
+            }
+        }
+
+    #pragma omp for collapse(2) 
+        for (int i = 0; i < radius; i++)
+            for (int j = 0; j < radius; j++)
+                gauss(i, j) /= sum;
+    }
+    return p_correlate(source, gauss);
+}
+
+
+
+/*The given image should have 3 channels(3d image). Outputs a grayscaled image which is now 2d.*/
+Image gray_scale(const Image& source) {
+    if (source.channels != 3) throw std::logic_error("gray_scale() : Number of channels should be 3.");
+    size_t num_pixels = source.width * source.height;
+
+    double* buffer = new double[num_pixels];
+    const double* source_mem = source.get_mem();
+    Image to_return(source.width, source.height, source.channels);
+
+    for (int i = 0; i < num_pixels; i++)
+        buffer[i] = (source_mem[i * 3] + source_mem[i * 3 + 1] + source_mem[i * 3 + 2]) / 3;
+    /* Averaging the rgb values*/
 
     return Image(source.width, source.height, 1, buffer);
 }
@@ -139,31 +269,33 @@ Image pad_2D(const Image& source, double value, size_t up, size_t left, size_t r
     size_t new_width = source.width + left + right;
     size_t new_height = source.height + up + down;
     Image to_ret(new_width, new_height, 1);
-    
-    for (size_t i = 0; i < up; i++) /*Up*/
-        for (size_t j = 0; j < new_width; j++)
+
+    for (int i = 0; i < up; i++) /*Up*/
+        for (int j = 0; j < new_width; j++)
             to_ret(i, j) = value;
 
-    for (size_t i = new_height - down; i < new_height; i++) /*Down*/
-        for (size_t j = 0; j < new_width; j++)
+    for (int i = new_height - down; i < new_height; i++) /*Down*/
+        for (int j = 0; j < new_width; j++)
             to_ret(i, j) = value;
- 
-    for (size_t i = 0; i < left; i++) /*Left*/
-        for (size_t j = 0; j < new_height; j++)
+
+    for (int i = 0; i < left; i++) /*Left*/
+        for (int j = 0; j < new_height; j++)
             to_ret(j, i) = value;
 
-    for (size_t i = new_width - right; i < new_width; i++)/*Right*/
-        for (size_t j = 0; j < new_height; j++)
+    for (int i = new_width - right; i < new_width; i++)/*Right*/
+        for (int j = 0; j < new_height; j++)
             to_ret(j, i) = value;
 
-    for (size_t i = up; i < up + source.height - 1; i++)
-        for (size_t j = left; j < left + source.width - 1; j++)
+    for (int i = up; i < up + source.height - 1; i++)
+        for (int j = left; j < left + source.width - 1; j++)
             to_ret(i, j) = source(i - up, j - left);
+
     return to_ret;
 }
+
 /*The given image should have a single channel*/
 Image correlate(const Image& source, const Filter& filter) {
-    
+
     if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
 
     size_t stride = 1, filter_width = filter.width, filter_height = filter.height, padding = 0, width = source.width, height = source.height;
@@ -172,8 +304,8 @@ Image correlate(const Image& source, const Filter& filter) {
 
     Image target(out_width, out_height, 1);
 
-    for (size_t i = 0; i < out_height; i++) 
-        for (size_t j = 0; j < out_width; j++)
+    for (int i = 0; i < out_height; i++)
+        for (int j = 0; j < out_width; j++)
             for (int a = 0; a < filter_height; a++)
                 for (int b = 0; b < filter_width; b++)
                     target(i, j) += source(i + a, j + b) * filter(a, b);
@@ -185,19 +317,19 @@ Image correlate(const Image& source, const Filter& filter) {
 Image edge_detection(const Image& source) {
 
     if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
-    
+
     Filter sobelX = { {1, 0, -1},
                       {2, 0, -2},
                       {1, 0, -1} };
-    Filter sobelY = {{ 1,  2,  1},
+    Filter sobelY = { { 1,  2,  1},
                      { 0,  0,  0},
                      {-1, -2, -1} };
     Image X = correlate(source, sobelX);
     Image Y = correlate(source, sobelY);
 
     /*Combining the vertical and horizontal edges*/
-    for (size_t i = 0; i < X.height; i++) {
-        for (size_t j = 0; j < X.width; j++)
+    for (int i = 0; i < X.height; i++) {
+        for (int j = 0; j < X.width; j++)
         {
             X(i, j) = sqrt(pow(X(i, j), 2) + pow(Y(i, j), 2));
         }
@@ -206,10 +338,11 @@ Image edge_detection(const Image& source) {
 }
 
 /*The given image should have a single channel*/
-Image gaussian_blurr(Image& source, double radius, double sigma) {
+Image gaussian_blurr(Image& source, int radius, double sigma) {
     if (source.channels != 1) throw std::logic_error("gray_scale() : Number of channels should be 3.");
     Filter gauss(radius, radius);
     double sum = 0;
+
     for (int i = 0; i < radius; i++) {
         for (int j = 0; j < radius; j++) {
             double sigma_pow_twice = 2 * sigma * sigma;
@@ -217,13 +350,23 @@ Image gaussian_blurr(Image& source, double radius, double sigma) {
             sum += gauss(i, j);
         }
     }
-    for (size_t i = 0; i < radius; i++)
-        for (size_t j = 0; j < radius; j++)
+
+    for (int i = 0; i < radius; i++)
+        for (int j = 0; j < radius; j++)
             gauss(i, j) /= sum;
+
     return correlate(source, gauss);
 }
+
+
+
+
 int main()
 {
+    float time_taken = 0;
+    float p_time_taken = 0;
+    std::cout << "MAX THREADS: " << omp_get_max_threads() << std::endl;
+    omp_set_num_threads(omp_get_max_threads());
     /* For edge detection, we first apply gray scale on the 3d image for to lose the 3rd dimension as we are not 
     concerned with the individual colors but only the intensity of the color. The gray scale operations is simply
     computing the average of each rgb pixel into one value. We apply a blur filter on the gray image to smooth out
@@ -232,14 +375,39 @@ int main()
     The image is now ready for edge detection. We convolve the image with 2 filters for detecting both horizontal edges
     and vertical edges. They are called sobel fitlers. We then combine the 2 separate output edges into a single image by
     using the formula given here.https://en.wikipedia.org/wiki/Sobel_operator. And now we have all the edges.*/
-
     Image image = Image::Read("shapes.png");
+
+
+    // SEQUENTIAL 
+    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
     Image gray_scaled_image = gray_scale(image);
     Image blurred_image = gaussian_blurr(gray_scaled_image, 5, 1);
     Image edges = edge_detection(blurred_image);
+
+    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+    time_taken = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+    std::cout << "Sequential Time difference = " << time_taken  << " micros" << std::endl;
+
+
+    // PARALLEL 
+    begin = std::chrono::steady_clock::now();
+
+    Image p_gray_scaled_image = p_gray_scale(image);
+    Image p_blurred_image = p_gaussian_blurr(gray_scaled_image, 5, 1);
+    Image p_edges = p_edge_detection(blurred_image);
+
+    end = std::chrono::steady_clock::now();
+    p_time_taken = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+    std::cout << "Parallel Time difference = " << p_time_taken << " micros" << std::endl;
+    std::cout << "Speed Up: " << float(time_taken / p_time_taken) << "x" << std::endl;
+
+    // Saving Image Data to Files
     gray_scaled_image.write("gray.png");
     blurred_image.write("blur.png");
     edges.write("edges.png");
+
+    std::cin >> time_taken;  // Just to prevent console window from closing when running EXE directly
 }
 
 
