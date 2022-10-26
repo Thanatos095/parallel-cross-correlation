@@ -185,7 +185,7 @@ Image p_correlate(const Image& source, const Filter& filter) {
 
     Image target(out_width, out_height, 1);
 
-    #pragma omp parallel for collapse(4)
+    #pragma omp parallel for collapse(4) shared(target)
     for (int i = 0; i < out_height; i++) 
         for (int j = 0; j < out_width; j++)
             for (int a = 0; a < filter_height; a++)
