@@ -145,27 +145,27 @@ Image p_pad_2D(const Image& source, double value, size_t up, size_t left, size_t
     
     #pragma omp parallel 
     {
-    #pragma omp for collapse(2)
+    #pragma omp for collapse(2) nowait
         for (int i = 0; i < up; i++) /*Up*/
             for (int j = 0; j < new_width; j++)
                 to_ret(i, j) = value;
 
-    #pragma omp for collapse(2)
+    #pragma omp for collapse(2) nowait
         for (int i = new_height - down; i < new_height; i++) /*Down*/
             for (int j = 0; j < new_width; j++)
                 to_ret(i, j) = value;
 
-    #pragma omp for collapse(2)
+    #pragma omp for collapse(2) nowait
         for (int i = 0; i < left; i++) /*Left*/
             for (int j = 0; j < new_height; j++)
                 to_ret(j, i) = value;
 
-    #pragma omp for collapse(2)
+    #pragma omp for collapse(2) nowait
         for (int i = new_width - right; i < new_width; i++)/*Right*/
             for (int j = 0; j < new_height; j++)
                 to_ret(j, i) = value;
 
-    #pragma omp for collapse(2)
+    #pragma omp for collapse(2) nowait
         for (int i = up; i < up + source.height - 1; i++)
             for (int j = left; j < left + source.width - 1; j++)
                 to_ret(i, j) = source(i - up, j - left);
